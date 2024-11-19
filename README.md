@@ -16,18 +16,18 @@ The json structure includes three main blocks:
 
 1. Create a virtual environment and install the requirements:
 
-(recommended)
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-```
-
-```bash
-pip install -r requirements.txt
-```
+   (recommended)
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   ```
+  
+   ```bash
+   pip install -r requirements.txt
+   ```
 
 2. Run script 
 
-```bash
-python txt_to_json.py --help
-```
+   ```bash
+   python txt_to_json.py --help
+   ```
