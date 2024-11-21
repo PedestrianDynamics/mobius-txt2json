@@ -3,7 +3,7 @@ import math
 import json
 import pandas as pd
 import typer
-
+import matplotlib.pyplot as plt
 app = typer.Typer()
 
 def parse_txt_with_pandas(file_path):
@@ -26,6 +26,20 @@ def parse_txt_with_pandas(file_path):
     return df, fps
 
 
+# Define a function to smooth rotations
+def smooth_rotation(rotations, max_change):
+    """Smooth rotations by limiting angular change."""
+    smoothed = [rotations.iloc[0]]  # Initialize with the first value
+    for i in range(1, len(rotations)):
+        prev = smoothed[-1]
+        diff = rotations.iloc[i] - prev
+        # Normalize the difference to be within -180 to 180 degrees
+        diff = (diff + 180) % 360 - 180
+        # Limit the change
+        diff = max(-max_change, min(max_change, diff))
+        smoothed.append(prev + diff)
+    return pd.Series(smoothed, index=rotations.index)
+
 def convert_df_to_json_optimized(df, fps, default_mode):
     time_step = 1 / fps
 
@@ -35,16 +49,39 @@ def convert_df_to_json_optimized(df, fps, default_mode):
     df["dy"] = df.groupby("id")["y"].diff().fillna(0)
     df["distance"] = (df["dx"] ** 2 + df["dy"] ** 2).pow(0.5)
     df["speed"] = df["distance"] / time_step
-    df["rotation"] = df.apply(
+    
+    df["raw_rotation"] = df.apply(
         lambda row: math.degrees(math.atan2(row["dy"], row["dx"]))
         if row["distance"] > 0
         else 0.0,
         axis=1,
     )
+    # Smooth rotation to limit changes
+    max_rotation_change = 90 * time_step  # Maximum angular change per time step
+    df["rotation"] = (
+        df.groupby("id")["raw_rotation"]
+        .apply(lambda group: smooth_rotation(group, max_rotation_change))
+        .reset_index(level=0, drop=True)
+    )
     max_speeds = df.groupby("id")["speed"].max()
+    # ================= debugging rotation
+    ids = df["id"].unique()
+    for i in range(5):
+        fig, ax = plt.subplots()
+        df_subset = df[df["id"] == ids[i]]
+        ax.plot(df_subset["frame"], df_subset["raw_rotation"], label="Raw Rotation")
+        ax.plot(df_subset["frame"], df_subset["rotation"], label="Smoothed Rotation")
+        ax.set_xlabel("frame")
+        ax.set_ylabel("rotation")
+        ax.set_title(f"Agent {ids[i]}")
+        ax.legend()
+        figname = f"rotation_{ids[i]}.png"
+        print(f"----> {figname}")
+        fig.savefig(figname)
+    # ================= debugging rotation
     # Construct entities block
     entities = [
-        {
+       {
             "id": int(entity_id) - 1,
             "name": f"Agent{int(entity_id)}",
             "simTimeS": "0.0",
