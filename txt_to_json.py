@@ -25,65 +25,96 @@ def parse_txt_with_pandas(file_path):
 
     return df, fps
 
-
-# Define a function to smooth rotations
-def smooth_rotation(rotations, max_change):
-    """Smooth rotations by limiting angular change."""
-    smoothed = [rotations.iloc[0]]  # Initialize with the first value
-    for i in range(1, len(rotations)):
-        prev = smoothed[-1]
-        diff = rotations.iloc[i] - prev
-        # Normalize the difference to be within -180 to 180 degrees
-        diff = (diff + 180) % 360 - 180
-        # Limit the change
-        diff = max(-max_change, min(max_change, diff))
-        smoothed.append(prev + diff)
-    return pd.Series(smoothed, index=rotations.index)
-
-def convert_df_to_json_optimized(df, fps, default_mode):
-    time_step = 1 / fps
-
+def smooth_rotation(
+    df, step_size, time_step, alpha=0.1
+):
+    """
+    Smooth rotations using differences with step_size and correct large jumps with a threshold.
+    Args:
+        df: DataFrame containing raw x, y coordinates.
+        step_size: Number of frames to use for differences.
+        time_step: Time step duration in seconds.
+    Returns:
+        Updated DataFrame with smoothed rotations.
+    """
     df["time"] = df["frame"] * time_step
+    # Step 1: Calculate differences over larger steps
+    # Symmetric difference for dx and dy
+    df["dx"] = df.groupby("id")["x"].shift(-step_size) - df.groupby("id")["x"].shift(step_size)
+    df["dy"] = df.groupby("id")["y"].shift(-step_size) - df.groupby("id")["y"].shift(step_size)
+    df2 = df.dropna(subset=["dx", "dy"]).copy()
 
-    df["dx"] = df.groupby("id")["x"].diff().fillna(0)
-    df["dy"] = df.groupby("id")["y"].diff().fillna(0)
-    df["distance"] = (df["dx"] ** 2 + df["dy"] ** 2).pow(0.5)
-    df["speed"] = df["distance"] / time_step
+    df2["distance"] = (df2["dx"] ** 2 + df2["dy"] ** 2).pow(0.5)
+    df2["speed"] = df2["distance"] / (2 * step_size*time_step)
     
-    df["raw_rotation"] = df.apply(
+
+    df2["raw_rotation"] = df2.apply(
         lambda row: math.degrees(math.atan2(row["dy"], row["dx"]))
         if row["distance"] > 0
         else 0.0,
         axis=1,
     )
-    # Smooth rotation to limit changes
-    max_rotation_change = 90 * time_step  # Maximum angular change per time step
-    df["rotation"] = (
-        df.groupby("id")["raw_rotation"]
-        .apply(lambda group: smooth_rotation(group, max_rotation_change))
-        .reset_index(level=0, drop=True)
-    )
+    # smooth the angles
+    df2["rotation"] = apply_ewma(df2["raw_rotation"], alpha=0.1)
+    
+    return df2
+
+
+def apply_ewma(df_column, alpha=0.3):
+    """
+    Apply forwards and backwards exponential weighted moving average (EWMA) to a pandas Series.
+    
+    Parameters:
+        df_column (pd.Series): The input column or time series to be smoothed.
+        alpha (float): The smoothing factor. Higher values give more weight to recent values (0 < alpha <= 1).
+        
+    Returns:
+        pd.Series: The smoothed column after applying forwards and backwards EWMAs.
+    """
+    # Apply forward EWMA
+    fwd_ewma = df_column.ewm(alpha=alpha).mean()
+    
+    # Apply backward EWMA (reverse the series, apply EWMA, then reverse back)
+    bwd_ewma = df_column[::-1].ewm(alpha=alpha).mean()[::-1]
+    
+    # Combine the forward and backward EWMAs
+    smoothed_series = (fwd_ewma + bwd_ewma) / 2
+    
+    return smoothed_series
+
+
+def convert_df_to_json_optimized(df, fps, default_mode):
+    time_step = 1 / fps # fps = 25
+    step_size = 10
+    alpha = 0.1
+    df = smooth_rotation(df, step_size, time_step, alpha=alpha)    
     max_speeds = df.groupby("id")["speed"].max()
     # ================= debugging rotation
     ids = df["id"].unique()
-    for i in range(5):
-        fig, ax = plt.subplots()
+    for i in range(20):
+        fig, (ax1, ax2) = plt.subplots(ncols=1, nrows=2)
         df_subset = df[df["id"] == ids[i]]
-        ax.plot(df_subset["frame"], df_subset["raw_rotation"], label="Raw Rotation")
-        ax.plot(df_subset["frame"], df_subset["rotation"], label="Smoothed Rotation")
-        ax.set_xlabel("frame")
-        ax.set_ylabel("rotation")
-        ax.set_title(f"Agent {ids[i]}")
-        ax.legend()
+        ax1.plot(df_subset["frame"], df_subset["raw_rotation"], "--", color='gray',label="Raw Rotation")
+        ax1.plot(df_subset["frame"], df_subset["rotation"], color='red',alpha=0.7,label="Smoothed Rotation")
+        ax2.plot(df_subset["frame"], df_subset["speed"], color='red',alpha=0.7,label="Speed")
+        ax1.set_xlabel("frame")
+        ax2.set_xlabel("frame")
+        ax1.set_ylabel(r"rotation [$\circ$]")
+        ax2.set_ylabel("speed [m/s]")
+        ax1.set_title(f"Agent {ids[i]}")
+        ax1.grid(alpha=0.3)
+        ax2.grid(alpha=0.3)
+        ax1.legend(loc='upper left', bbox_to_anchor=(1.05, 1))  # Legend outside
+        plt.tight_layout()
         figname = f"rotation_{ids[i]}.png"
         print(f"----> {figname}")
-        fig.savefig(figname)
+        fig.savefig(figname, dpi=300)
     # ================= debugging rotation
     # Construct entities block
     entities = [
-       {
+        {
             "id": int(entity_id) - 1,
-            "name": f"Agent{int(entity_id)}",
+            "name": f"Adult {'Male' if int(entity_id) % 2 == 0 else 'Female'} [{int(entity_id) - 1}]",            
             "simTimeS": "0.0",
             "max_speed": round(max_speed, 3),
             "m_plane": "F#0",
@@ -94,14 +125,15 @@ def convert_df_to_json_optimized(df, fps, default_mode):
 
     # Construct simulation block
     simulation = []
+    precision = 3
     for time, group in df.groupby("time"):
         samples = group.apply(
             lambda row: {
                 "entity": int(row["id"]) - 1,
-                "position": {"x": row["x"], "y": row["y"], "z": row["z"]},
+                "position": {"x": round(row["x"], precision), "y": round(row["y"], precision), "z": round(0*row["z"], precision)},# TODO: setting z to 0 is a hack to make the visualisator happy!
                 "mode": default_mode,
-                "rotation": row["rotation"],
-                "speed": row["speed"],
+                "rotation": round(row["rotation"], precision),
+                "speed": round(row["speed"], precision),
             },
             axis=1,
         ).tolist()
